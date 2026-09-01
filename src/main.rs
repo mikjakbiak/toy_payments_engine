@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
+use std::fs::File;
+use std::io::Write;
 use std::process;
 
 #[derive(Debug, Clone)]
@@ -211,6 +213,33 @@ fn process_operations(
     clients
 }
 
+fn save_to_csv(clients: &HashMap<u16, Client>, path: &str) {
+    let output_path = path.replace("_input.csv", "_output.csv");
+
+    let client_ids = clients.keys().copied().collect::<Vec<_>>();
+
+    let mut file = File::create(&output_path).unwrap_or_else(|err| {
+        eprintln!("error creating output file {output_path}: {err}");
+        process::exit(1);
+    });
+
+    if let Err(err) = (|| -> Result<(), Box<dyn Error>> {
+        writeln!(file, "client, available, held, total, locked")?;
+        for id in client_ids {
+            let client = &clients[&id];
+            writeln!(
+                file,
+                "{}, {}, {}, {}, {}",
+                client.id, client.available, client.held, client.total, client.locked
+            )?;
+        }
+        Ok(())
+    })() {
+        eprintln!("error writing output file {output_path}: {err}");
+        process::exit(1);
+    }
+}
+
 fn main() {
     let path = env::args().nth(1).unwrap_or_else(|| {
         eprintln!("Usage: {} <operations.csv>", env::args().next().unwrap());
@@ -230,6 +259,8 @@ fn main() {
     let clients = process_operations(operations, &mut transactions);
 
     println!("{clients:#?}");
+
+    save_to_csv(&clients, &path);
 }
 
 #[cfg(test)]
