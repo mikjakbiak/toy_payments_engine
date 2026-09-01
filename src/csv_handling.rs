@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 
 use crate::money::amount_to_string;
 use crate::types::{Client, CsvRecord, Operation, OperationType};
@@ -37,18 +36,17 @@ pub fn read_csv(path: &str) -> Result<(Vec<Operation>, HashMap<u32, Operation>),
     Ok((operations, transactions))
 }
 
-pub fn write_csv(clients: &HashMap<u16, Client>, path: &str) -> Result<(), Box<dyn Error>> {
-    let output_path = path.replace("_input.csv", "_output.csv");
+pub fn write_clients_stdout(clients: &HashMap<u16, Client>) -> Result<(), Box<dyn Error>> {
+    let mut client_ids = clients.keys().copied().collect::<Vec<_>>();
+    client_ids.sort();
 
-    let client_ids = clients.keys().copied().collect::<Vec<_>>();
+    let mut stdout = io::stdout().lock();
 
-    let mut file = File::create(&output_path)?;
-
-    writeln!(file, "client, available, held, total, locked")?;
+    writeln!(stdout, "client, available, held, total, locked")?;
     for id in client_ids {
         let client = &clients[&id];
         writeln!(
-            file,
+            stdout,
             "{}, {}, {}, {}, {}",
             client.id,
             amount_to_string(client.available),

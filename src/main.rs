@@ -7,7 +7,7 @@ mod types;
 use types::{Client, Operation, OperationType};
 
 mod csv_handling;
-use csv_handling::{read_csv, write_csv};
+use csv_handling::{read_csv, write_clients_stdout};
 
 fn process_operations(
     operations: Vec<Operation>,
@@ -25,7 +25,7 @@ fn process_operations(
         });
 
         if entry.locked {
-            println!(
+            eprintln!(
                 "Client {} is locked; No operation will be processed",
                 entry.id
             );
@@ -52,7 +52,7 @@ fn process_operations(
             OperationType::Dispute => {
                 if let Some(tx) = transactions.get_mut(&op.id) {
                     if tx.is_disputed {
-                        println!(
+                        eprintln!(
                             "Tried to dispute transaction {} but it is already disputed",
                             op.id
                         );
@@ -75,7 +75,7 @@ fn process_operations(
             OperationType::Resolve => {
                 if let Some(tx) = transactions.get_mut(&op.id) {
                     if !tx.is_disputed {
-                        println!(
+                        eprintln!(
                             "Tried to resolve transaction {} but it is not disputed",
                             op.id
                         );
@@ -98,7 +98,7 @@ fn process_operations(
             OperationType::Chargeback => {
                 if let Some(tx) = transactions.get_mut(&op.id) {
                     if !tx.is_disputed {
-                        println!(
+                        eprintln!(
                             "Tried to chargeback transaction {} but it is not disputed",
                             op.id
                         );
@@ -137,18 +137,11 @@ fn main() {
         }
     };
 
-    println!("{operations:#?}, {}", operations.len());
-
     let clients = process_operations(operations, &mut transactions);
 
-    println!("{clients:#?}");
-
-    match write_csv(&clients, &path) {
-        Ok(()) => println!("CSV written successfully"),
-        Err(err) => {
-            eprintln!("error writing CSV: {err}");
-            process::exit(1);
-        }
+    if let Err(err) = write_clients_stdout(&clients) {
+        eprintln!("error writing output: {err}");
+        process::exit(1);
     }
 }
 
