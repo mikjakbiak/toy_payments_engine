@@ -1,119 +1,12 @@
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
-use std::error::Error;
-use std::fs::File;
-use std::io::Write;
 use std::process;
 
-#[derive(Debug, Clone)]
-enum OperationType {
-    Deposit { amount: f64 },
-    Withdrawal { amount: f64 },
-    Dispute,
-    Resolve,
-    Chargeback,
-}
+mod types;
+use types::{Client, Operation, OperationType};
 
-#[derive(Debug, Clone)]
-struct Operation {
-    id: u32,
-    op_type: OperationType,
-    client: u16,
-    is_disputed: bool,
-}
-
-#[derive(Debug)]
-struct Client {
-    id: u16,
-    available: f64,
-    held: f64,
-    total: f64,
-    locked: bool,
-}
-
-#[derive(Deserialize)]
-struct CsvRecord {
-    #[serde(rename = "type")]
-    op_type: String,
-    client: u16,
-    tx: u32,
-    amount: Option<f64>,
-}
-
-impl TryFrom<CsvRecord> for Operation {
-    type Error = String;
-
-    fn try_from(record: CsvRecord) -> Result<Self, Self::Error> {
-        let op_type = match record.op_type.as_str() {
-            "deposit" => OperationType::Deposit {
-                amount: record
-                    .amount
-                    .ok_or_else(|| format!("deposit operation {} missing amount", record.tx))?,
-            },
-            "withdrawal" => OperationType::Withdrawal {
-                amount: record
-                    .amount
-                    .ok_or_else(|| format!("withdrawal operation {} missing amount", record.tx))?,
-            },
-            "dispute" => OperationType::Dispute,
-            "resolve" => OperationType::Resolve,
-            "chargeback" => OperationType::Chargeback,
-            other => return Err(format!("unknown operation type: {other}")),
-        };
-
-        Ok(Operation {
-            id: record.tx,
-            op_type,
-            client: record.client,
-            is_disputed: false,
-        })
-    }
-}
-
-impl Operation {
-    fn get_tx_amount(&self) -> Option<f64> {
-        match self.op_type {
-            OperationType::Deposit { amount } | OperationType::Withdrawal { amount } => {
-                Some(amount)
-            }
-            _ => None,
-        }
-    }
-}
-
-fn read_operations(
-    path: &str,
-) -> Result<(Vec<Operation>, HashMap<u32, Operation>), Box<dyn Error>> {
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_path(path)?;
-
-    // contains all operations
-    let mut operations = Vec::new();
-    // map of balance mutating operations == transactions
-    let mut transactions = HashMap::new();
-
-    for result in reader.deserialize() {
-        let record: CsvRecord = result?;
-        let operation = Operation::try_from(record)?;
-        match operation.op_type {
-            OperationType::Deposit { .. } => {
-                transactions
-                    .entry(operation.id)
-                    .or_insert(operation.clone());
-            }
-            OperationType::Withdrawal { .. } => {
-                transactions
-                    .entry(operation.id)
-                    .or_insert(operation.clone());
-            }
-            _ => {}
-        }
-        operations.push(operation);
-    }
-    Ok((operations, transactions))
-}
+mod csv_handling;
+use csv_handling::{read_csv, write_csv};
 
 fn process_operations(
     operations: Vec<Operation>,
@@ -213,40 +106,13 @@ fn process_operations(
     clients
 }
 
-fn save_to_csv(clients: &HashMap<u16, Client>, path: &str) {
-    let output_path = path.replace("_input.csv", "_output.csv");
-
-    let client_ids = clients.keys().copied().collect::<Vec<_>>();
-
-    let mut file = File::create(&output_path).unwrap_or_else(|err| {
-        eprintln!("error creating output file {output_path}: {err}");
-        process::exit(1);
-    });
-
-    if let Err(err) = (|| -> Result<(), Box<dyn Error>> {
-        writeln!(file, "client, available, held, total, locked")?;
-        for id in client_ids {
-            let client = &clients[&id];
-            writeln!(
-                file,
-                "{}, {}, {}, {}, {}",
-                client.id, client.available, client.held, client.total, client.locked
-            )?;
-        }
-        Ok(())
-    })() {
-        eprintln!("error writing output file {output_path}: {err}");
-        process::exit(1);
-    }
-}
-
 fn main() {
     let path = env::args().nth(1).unwrap_or_else(|| {
         eprintln!("Usage: {} <operations.csv>", env::args().next().unwrap());
         process::exit(1);
     });
 
-    let (operations, mut transactions) = match read_operations(&path) {
+    let (operations, mut transactions) = match read_csv(&path) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error reading operations: {err}");
@@ -254,13 +120,19 @@ fn main() {
         }
     };
 
-    println!("{operations:#?}");
+    println!("{operations:#?}, {}", operations.len());
 
     let clients = process_operations(operations, &mut transactions);
 
     println!("{clients:#?}");
 
-    save_to_csv(&clients, &path);
+    match write_csv(&clients, &path) {
+        Ok(()) => println!("CSV written successfully"),
+        Err(err) => {
+            eprintln!("error writing CSV: {err}");
+            process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]
