@@ -1,9 +1,11 @@
 use serde::Deserialize;
 
+use crate::money::amount_from_str;
+
 #[derive(Debug, Clone)]
 pub enum OperationType {
-    Deposit { amount: f64 },
-    Withdrawal { amount: f64 },
+    Deposit { amount: u64 },
+    Withdrawal { amount: u64 },
     Dispute,
     Resolve,
     Chargeback,
@@ -20,9 +22,9 @@ pub struct Operation {
 #[derive(Debug)]
 pub struct Client {
     pub id: u16,
-    pub available: f64,
-    pub held: f64,
-    pub total: f64,
+    pub available: u64,
+    pub held: u64,
+    pub total: u64,
     pub locked: bool,
 }
 
@@ -32,7 +34,7 @@ pub struct CsvRecord {
     op_type: String,
     client: u16,
     tx: u32,
-    amount: Option<f64>,
+    amount: Option<String>,
 }
 
 impl TryFrom<CsvRecord> for Operation {
@@ -41,14 +43,22 @@ impl TryFrom<CsvRecord> for Operation {
     fn try_from(record: CsvRecord) -> Result<Self, Self::Error> {
         let op_type = match record.op_type.as_str() {
             "deposit" => OperationType::Deposit {
-                amount: record
-                    .amount
-                    .ok_or_else(|| format!("deposit operation {} missing amount", record.tx))?,
+                amount: amount_from_str(
+                    record
+                        .amount
+                        .as_deref()
+                        .ok_or_else(|| format!("deposit operation {} missing amount", record.tx))?,
+                )?,
             },
             "withdrawal" => OperationType::Withdrawal {
-                amount: record
-                    .amount
-                    .ok_or_else(|| format!("withdrawal operation {} missing amount", record.tx))?,
+                amount: amount_from_str(
+                    record
+                        .amount
+                        .as_deref()
+                        .ok_or_else(|| {
+                            format!("withdrawal operation {} missing amount", record.tx)
+                        })?,
+                )?,
             },
             "dispute" => OperationType::Dispute,
             "resolve" => OperationType::Resolve,
@@ -66,7 +76,7 @@ impl TryFrom<CsvRecord> for Operation {
 }
 
 impl Operation {
-    pub fn get_tx_amount(&self) -> Option<f64> {
+    pub fn get_tx_amount(&self) -> Option<u64> {
         match self.op_type {
             OperationType::Deposit { amount } | OperationType::Withdrawal { amount } => {
                 Some(amount)

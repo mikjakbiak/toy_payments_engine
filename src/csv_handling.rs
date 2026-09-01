@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 
+use crate::money::amount_to_string;
 use crate::types::{Client, CsvRecord, Operation, OperationType};
 
 pub fn read_csv(path: &str) -> Result<(Vec<Operation>, HashMap<u32, Operation>), Box<dyn Error>> {
@@ -49,7 +50,11 @@ pub fn write_csv(clients: &HashMap<u16, Client>, path: &str) -> Result<(), Box<d
         writeln!(
             file,
             "{}, {}, {}, {}, {}",
-            client.id, client.available, client.held, client.total, client.locked
+            client.id,
+            amount_to_string(client.available),
+            amount_to_string(client.held),
+            amount_to_string(client.total),
+            client.locked
         )?;
     }
 
