@@ -69,6 +69,17 @@ impl TryFrom<CsvRecord> for Operation {
     }
 }
 
+impl Operation {
+    fn get_tx_amount(&self) -> Option<f64> {
+        match self.op_type {
+            OperationType::Deposit { amount } | OperationType::Withdrawal { amount } => {
+                Some(amount)
+            }
+            _ => None,
+        }
+    }
+}
+
 fn read_operations(
     path: &str,
 ) -> Result<(Vec<Operation>, HashMap<u32, Operation>), Box<dyn Error>> {
@@ -104,7 +115,7 @@ fn read_operations(
 
 fn process_operations(
     operations: Vec<Operation>,
-    mut transactions: HashMap<u32, Operation>,
+    transactions: &mut HashMap<u32, Operation>,
 ) -> HashMap<u16, Client> {
     let mut clients = HashMap::new();
 
@@ -131,17 +142,47 @@ fn process_operations(
             // takes disputed amount -> decrease available and increase held and mark transaction as disputed
             // NOTE: if there is no such transaction, we should just ignore it
             OperationType::Dispute => {
-                println!("dispute");
+                if let Some(tx) = transactions.get_mut(&op.id) {
+                    if tx.is_disputed {
+                        continue;
+                    }
+                    let Some(amount) = tx.get_tx_amount() else {
+                        continue;
+                    };
+                    entry.available -= amount;
+                    entry.held += amount;
+                    tx.is_disputed = true;
+                }
             }
             // takes disputed amount -> checks if transaction is disputed and if so, increases available and decreases held and marks transaction as not disputed
             // NOTE: if there is no such transaction or it is not disputed, we should just ignore it
             OperationType::Resolve => {
-                println!("resolve");
+                if let Some(tx) = transactions.get_mut(&op.id) {
+                    if !tx.is_disputed {
+                        continue;
+                    }
+                    let Some(amount) = tx.get_tx_amount() else {
+                        continue;
+                    };
+                    entry.available += amount;
+                    entry.held -= amount;
+                    tx.is_disputed = false;
+                }
             }
-            // takes disputed amount -> checks if transaction is disputed and if so, decrease held and total and mark transaction as not disputed
+            // takes disputed amount -> checks if transaction is disputed and if so, decrease held and total and mark transaction as not disputed. Marks client as locked.
             // NOTE: if there is no such transaction or it is not disputed, we should just ignore it
             OperationType::Chargeback => {
-                println!("chargeback");
+                if let Some(tx) = transactions.get_mut(&op.id) {
+                    if !tx.is_disputed {
+                        continue;
+                    }
+                    let Some(amount) = tx.get_tx_amount() else {
+                        continue;
+                    };
+                    entry.held -= amount;
+                    entry.total -= amount;
+                    tx.is_disputed = false;
+                }
             }
         }
     }
@@ -155,7 +196,7 @@ fn main() {
         process::exit(1);
     });
 
-    let (operations, transactions) = match read_operations(&path) {
+    let (operations, mut transactions) = match read_operations(&path) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error reading operations: {err}");
@@ -165,7 +206,186 @@ fn main() {
 
     println!("{operations:#?}");
 
-    let clients = process_operations(operations, transactions);
+    let clients = process_operations(operations, &mut transactions);
 
     println!("{clients:#?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deposit(id: u32, client: u16, amount: f64) -> Operation {
+        Operation {
+            id,
+            op_type: OperationType::Deposit { amount },
+            client,
+            is_disputed: false,
+        }
+    }
+
+    fn withdrawal(id: u32, client: u16, amount: f64) -> Operation {
+        Operation {
+            id,
+            op_type: OperationType::Withdrawal { amount },
+            client,
+            is_disputed: false,
+        }
+    }
+
+    fn dispute(tx_id: u32, client: u16) -> Operation {
+        Operation {
+            id: tx_id,
+            op_type: OperationType::Dispute,
+            client,
+            is_disputed: false,
+        }
+    }
+
+    fn resolve(tx_id: u32, client: u16) -> Operation {
+        Operation {
+            id: tx_id,
+            op_type: OperationType::Resolve,
+            client,
+            is_disputed: false,
+        }
+    }
+
+    fn chargeback(tx_id: u32, client: u16) -> Operation {
+        Operation {
+            id: tx_id,
+            op_type: OperationType::Chargeback,
+            client,
+            is_disputed: false,
+        }
+    }
+
+    fn client_state(clients: &HashMap<u16, Client>, id: u16) -> (f64, f64, f64) {
+        let client = clients.get(&id).expect("client should exist");
+        (client.available, client.held, client.total)
+    }
+
+    #[test]
+    fn deposit_increases_available_and_total() {
+        let operations = vec![deposit(1, 1, 10.0)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn withdrawal_decreases_available_and_total() {
+        let operations = vec![deposit(1, 1, 10.0), withdrawal(2, 1, 4.0)];
+        let mut transactions =
+            HashMap::from([(1, operations[0].clone()), (2, operations[1].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert_eq!(client_state(&clients, 1), (6.0, 0.0, 6.0));
+    }
+
+    #[test]
+    fn dispute_marks_transaction_and_moves_funds_to_held() {
+        let operations = vec![deposit(1, 1, 10.0), dispute(1, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert!(transactions.get(&1).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 1), (0.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn resolve_unmarks_dispute_and_returns_funds_to_available() {
+        let operations = vec![
+            deposit(1, 1, 10.0),
+            deposit(2, 1, 5.0),
+            dispute(1, 1),
+            dispute(2, 1),
+            resolve(1, 1),
+        ];
+        let mut transactions =
+            HashMap::from([(1, operations[0].clone()), (2, operations[1].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+        assert!(transactions.get(&2).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 1), (10.0, 5.0, 15.0));
+    }
+
+    #[test]
+    fn chargeback_unmarks_dispute_and_decreases_held_and_total() {
+        let operations = vec![
+            deposit(1, 1, 10.0),
+            deposit(2, 1, 5.0),
+            dispute(1, 1),
+            dispute(2, 1),
+            chargeback(1, 1),
+        ];
+        let mut transactions =
+            HashMap::from([(1, operations[0].clone()), (2, operations[1].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+        assert!(transactions.get(&2).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 1), (0.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn dispute_ignores_non_existing_transaction() {
+        let operations = vec![deposit(1, 1, 10.0), dispute(99, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn resolve_ignores_non_existing_transaction() {
+        let operations = vec![deposit(1, 1, 10.0), resolve(99, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+    }
+
+    #[test]
+    fn chargeback_ignores_non_existing_transaction() {
+        let operations = vec![deposit(1, 1, 10.0), chargeback(99, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+    }
+
+    #[test]
+    fn resolve_ignores_non_disputed_transaction() {
+        let operations = vec![deposit(1, 1, 10.0), resolve(1, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn chargeback_ignores_non_disputed_transaction() {
+        let operations = vec![deposit(1, 1, 10.0), chargeback(1, 1)];
+        let mut transactions = HashMap::from([(1, operations[0].clone())]);
+
+        let clients = process_operations(operations, &mut transactions);
+
+        assert!(!transactions.get(&1).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 1), (10.0, 0.0, 10.0));
+    }
 }
