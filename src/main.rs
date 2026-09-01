@@ -89,9 +89,10 @@ mod tests {
     ) -> (HashMap<u16, Client>, HashMap<u32, Operation>) {
         let mut clients = HashMap::new();
         let mut deposits = HashMap::new();
+        let mut previous_tx_id = 0;
 
         for operation in operations {
-            process_operation(&operation, &mut clients, &mut deposits);
+            process_operation(&operation, &mut clients, &mut deposits, &mut previous_tx_id);
             if matches!(operation.op_type, OperationType::Deposit { .. }) {
                 deposits.entry(operation.id).or_insert(operation);
             }
@@ -223,5 +224,49 @@ mod tests {
         assert!(deposits.get(&2).unwrap().is_disputed);
         assert_eq!(client_state(&clients, 1), (0, 50_000, 50_000, true));
         assert_eq!(client_state(&clients, 2), (50_000, 0, 50_000, false));
+    }
+
+    #[test]
+    fn cross_client_dispute_and_chargeback_are_ignored() {
+        let operations = vec![
+            deposit(28, 14, 100_000),
+            deposit(29, 15, 100_000),
+            dispute(28, 15),
+            chargeback(28, 15),
+        ];
+        let (clients, deposits) = run_operations(operations);
+
+        assert!(!deposits.get(&28).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 14), (100_000, 0, 100_000, false));
+        assert_eq!(client_state(&clients, 15), (100_000, 0, 100_000, false));
+    }
+
+    #[test]
+    fn duplicate_tx_id_does_not_overwrite_deposit() {
+        let operations = vec![
+            deposit(33, 18, 100_000),
+            deposit(33, 19, 200_000),
+            dispute(33, 19),
+        ];
+        let (clients, deposits) = run_operations(operations);
+
+        assert_eq!(deposits.get(&33).unwrap().client, 18);
+        assert!(!deposits.get(&33).unwrap().is_disputed);
+        assert_eq!(client_state(&clients, 18), (100_000, 0, 100_000, false));
+        assert_eq!(client_state(&clients, 19), (0, 0, 0, false));
+    }
+
+    #[test]
+    fn duplicate_tx_id_does_not_overwrite_withdrawal() {
+        let operations = vec![
+            deposit(1, 1, 100_000),
+            deposit(2, 2, 100_000),
+            withdrawal(3, 1, 50_000),
+            withdrawal(3, 2, 50_000),
+        ];
+        let (clients, _deposits) = run_operations(operations);
+
+        assert_eq!(client_state(&clients, 1), (50_000, 0, 50_000, false));
+        assert_eq!(client_state(&clients, 2), (100_000, 0, 100_000, false));
     }
 }

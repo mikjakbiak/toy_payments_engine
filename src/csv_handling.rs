@@ -9,6 +9,7 @@ pub fn process_operation(
     operation: &Operation,
     clients: &mut HashMap<u16, Client>,
     deposits: &mut HashMap<u32, Operation>,
+    previous_tx_id: &mut u32,
 ) {
     let entry = clients.entry(operation.client).or_insert(Client {
         id: operation.client,
@@ -29,22 +30,35 @@ pub fn process_operation(
     match operation.op_type {
         // increase available and total
         OperationType::Deposit { amount } => {
+            if *previous_tx_id == operation.id {
+                return;
+            }
             entry.available += amount;
             entry.total += amount;
+
+            *previous_tx_id = operation.id;
         }
         // decrease available and total
         OperationType::Withdrawal { amount } => {
+            if *previous_tx_id == operation.id {
+                return;
+            }
             if entry.available < amount || entry.total < amount {
                 // TODO: decide what should happen when a withdrawal would make available or total negative
                 return;
             }
             entry.available -= amount;
             entry.total -= amount;
+
+            *previous_tx_id = operation.id;
         }
         // takes disputed amount -> decrease available and increase held and mark transaction as disputed
         // NOTE: if there is no such transaction, we should just ignore it
         OperationType::Dispute => {
             if let Some(tx) = deposits.get_mut(&operation.id) {
+                if tx.client != operation.client {
+                    return;
+                }
                 if tx.is_disputed {
                     eprintln!(
                         "Tried to dispute transaction {} but it is already disputed",
@@ -68,6 +82,9 @@ pub fn process_operation(
         // NOTE: if there is no such transaction or it is not disputed, we should just ignore it
         OperationType::Resolve => {
             if let Some(tx) = deposits.get_mut(&operation.id) {
+                if tx.client != operation.client {
+                    return;
+                }
                 if !tx.is_disputed {
                     eprintln!(
                         "Tried to resolve transaction {} but it is not disputed",
@@ -91,6 +108,9 @@ pub fn process_operation(
         // NOTE: if there is no such transaction or it is not disputed, we should just ignore it
         OperationType::Chargeback => {
             if let Some(tx) = deposits.get_mut(&operation.id) {
+                if tx.client != operation.client {
+                    return;
+                }
                 if !tx.is_disputed {
                     eprintln!(
                         "Tried to chargeback transaction {} but it is not disputed",
@@ -124,10 +144,12 @@ pub fn read_csv(path: &str) -> Result<HashMap<u16, Client>, Box<dyn Error>> {
     // deposit transactions for disputes and chargebacks
     let mut deposits = HashMap::new();
 
+    let mut previous_tx_id = 0;
+
     for result in reader.deserialize() {
         let record: CsvRecord = result?;
         let operation = Operation::try_from(record)?;
-        process_operation(&operation, &mut clients, &mut deposits);
+        process_operation(&operation, &mut clients, &mut deposits, &mut previous_tx_id);
         if matches!(operation.op_type, OperationType::Deposit { .. }) {
             deposits.entry(operation.id).or_insert(operation);
         }
